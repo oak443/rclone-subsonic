@@ -1,0 +1,19 @@
+[Unit]
+Description=rclone-subsonic Subsonic server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=saki
+Group=saki
+# rclone 可执行文件必须在 PATH 中（managed = true）
+Environment=RUST_LOG=info,rclone_subsonic=debug
+ExecStart=/usr/local/bin/rclone-subsonic serve --config /etc/rclone-subsonic/config.toml
+Restart=on-failure
+RestartSec=5
+# 让 rclone 与 SQLite 都能打开足够多的文件
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

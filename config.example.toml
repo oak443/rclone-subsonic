@@ -1,0 +1,52 @@
+# rclone-subsonic 配置示例
+# 复制到 ~/.config/rclone-subsonic/config.toml，或通过 --config 指定。
+
+[paths]
+db = "~/.local/share/rclone-subsonic/library.db"
+cover_cache = "~/.cache/rclone-subsonic"
+
+[server]
+# 手机/桌面客户端要访问，通常需要监听局域网地址
+bind = "0.0.0.0:4533"
+music_folder_name = "Music"
+# 可选：生成 artistImageUrl 的对外根地址（反向代理时建议填写）
+# public_url = "https://music.example.com"
+
+[auth]
+username = "saki"
+# 可用环境变量 RCLONE_SUBSONIC_PASSWORD 覆盖
+password = "change-me"
+# 兼容只支持明文/HEX 密码的老客户端；不需要可设为 false
+allow_plaintext = true
+
+[storage]
+# rclone fs 字符串：远端 "gdrive:Music"，或本地路径 "/home/saki/Music"
+remote = "/home/saki/Music"
+# true: 由本程序启动并回收 rclone serve http --rc
+managed = true
+rclone_binary = "rclone"
+
+# managed = false 时，连接你自己启动的 rclone：
+# http_url  = "http://127.0.0.1:8080"
+# http_user = "rclone"
+# http_pass = "..."
+# rc_url    = "http://127.0.0.1:5572"
+# rc_user   = "rclone"
+# rc_pass   = "..."
+
+[scan]
+# 启动时后台扫描；接口立刻可用，期间 getScanStatus 会报告 scanning=true
+on_start = true
+# 0 = 关闭周期扫描
+interval_hours = 0
+# 同时列取多少个 artist 目录
+list_concurrency = 4
+
+[cover]
+# 在专辑目录内按顺序查找封面
+names = ["cover.jpg", "front.jpg", "folder.jpg", "album.jpg", "cover.png"]
+
+[artist_art]
+# 艺术家图只认艺术家目录根部的这些文件名；
+# 不查找专辑目录，也不用专辑封面兜底，没有就是没有。
+names = ["artist.jpg", "artist.jpeg", "artist.png", "artist.webp"]
