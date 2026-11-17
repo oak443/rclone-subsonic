@@ -29,7 +29,7 @@ Music/
 
 - Rust 1.85+（edition 2024）
 - rclone 1.60+（本机在 1.60.1 上验证过；建议用最新版）
-- 一个可被 rclone 访问的曲库：远端（如 `gdrive:Music`）或本地路径（如 `/home/saki/Music`）
+- 一个可被 rclone 访问的曲库：远端（如 `gdrive:Music`）或本地路径（如 `/path/to/Music`）
 - 首次构建需要能访问 crates.io
 
 如果用的是远端，先确认 `rclone lsf <remote> --max-depth 2` 能正常列出。
@@ -82,6 +82,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now rclone-subsonic
 journalctl -u rclone-subsonic -f
 ```
+
+部署前先把 `deploy/rclone-subsonic.service` 里的 `User` / `Group` 改成实际运行用户；该用户需要能读 rclone 配置和音乐库。
 
 `managed = true` 时，运行用户需要能找到 `rclone`，并且能读 rclone 配置文件（默认 `~/.config/rclone/rclone.conf`）。
 

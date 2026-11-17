@@ -13,15 +13,15 @@ music_folder_name = "Music"
 # public_url = "https://music.example.com"
 
 [auth]
-username = "saki"
+username = "youruser"
 # 可用环境变量 RCLONE_SUBSONIC_PASSWORD 覆盖
 password = "change-me"
 # 兼容只支持明文/HEX 密码的老客户端；不需要可设为 false
 allow_plaintext = true
 
 [storage]
-# rclone fs 字符串：远端 "gdrive:Music"，或本地路径 "/home/saki/Music"
-remote = "/home/saki/Music"
+# rclone fs 字符串：远端 "gdrive:Music"，或本地路径 "/path/to/Music"
+remote = "/path/to/Music"
 # true: 由本程序启动并回收 rclone serve http --rc
 managed = true
 rclone_binary = "rclone"

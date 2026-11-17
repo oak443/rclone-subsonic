@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=saki
-Group=saki
+# 改成实际运行 rclone-subsonic 的用户（需能读 rclone 配置和音乐库）
+User=YOUR_USER
+Group=YOUR_USER
 # rclone 可执行文件必须在 PATH 中（managed = true）
 Environment=RUST_LOG=info,rclone_subsonic=debug
 ExecStart=/usr/local/bin/rclone-subsonic serve --config /etc/rclone-subsonic/config.toml

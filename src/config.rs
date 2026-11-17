@@ -49,7 +49,7 @@ pub struct AuthConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageConfig {
-    /// rclone fs string: "gdrive:Music" 或本地路径 "/home/saki/Music"
+    /// rclone fs string: "gdrive:Music" 或本地路径 "/path/to/Music"
     pub remote: String,
     #[serde(default = "default_true")]
     pub managed: bool,
