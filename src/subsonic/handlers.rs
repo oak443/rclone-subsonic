@@ -12,8 +12,6 @@ use crate::db::{self, AlbumRow, ArtistRow, SongRow};
 use crate::ids::{self, EntityKind};
 use crate::media;
 
-const IGNORED_ARTICLES: &str = "The A An";
-
 pub async fn api(
     state: &AppState,
     method: &str,
@@ -89,10 +87,10 @@ pub async fn api(
         "getArtistInfo2" => get_artist_info(state, params, base_url, "artistInfo2").await,
         "getArtistInfo" => get_artist_info(state, params, base_url, "artistInfo").await,
         // Aonsoku 调用 getAlbumInfo2 但读取 albumInfo，两个 key 都返回以兼容
-        "getAlbumInfo2" => Ok(json!({
-            "albumInfo2": empty_album_info(),
-            "albumInfo": empty_album_info(),
-        })),
+        "getAlbumInfo2" => {
+            let info = empty_album_info();
+            Ok(json!({ "albumInfo2": info.clone(), "albumInfo": info }))
+        }
         "getAlbumInfo" => Ok(json!({ "albumInfo": empty_album_info() })),
         "getTopSongs" => Ok(json!({ "topSongs": { "song": [] } })),
         "getSimilarSongs2" => Ok(json!({ "similarSongs2": { "song": [] } })),
@@ -116,21 +114,11 @@ pub async fn api(
 
 async fn get_indexes(state: &AppState, base_url: &str) -> Result<Value, ApiError> {
     let artists = db::list_artists(&state.db).await?;
-    let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for artist in &artists {
-        groups
-            .entry(index_letter(&artist.name))
-            .or_default()
-            .push(artist_json(artist, base_url, &state.image_secret));
-    }
-    let index: Vec<Value> = groups
-        .into_iter()
-        .map(|(name, artist)| json!({ "name": name, "artist": artist }))
-        .collect();
+    let index = grouped_artists(&artists, base_url, &state.image_secret);
     let last_modified = db::get_last_scan(&state.db).await?.unwrap_or(0);
     Ok(json!({
         "indexes": {
-            "ignoredArticles": IGNORED_ARTICLES,
+            "ignoredArticles": media::SORT_ARTICLES.join(" "),
             "lastModified": last_modified,
             "index": index,
         }
@@ -139,23 +127,27 @@ async fn get_indexes(state: &AppState, base_url: &str) -> Result<Value, ApiError
 
 async fn get_artists(state: &AppState, base_url: &str) -> Result<Value, ApiError> {
     let artists = db::list_artists(&state.db).await?;
-    let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for artist in &artists {
-        groups
-            .entry(index_letter(&artist.name))
-            .or_default()
-            .push(artist_json(artist, base_url, &state.image_secret));
-    }
-    let index: Vec<Value> = groups
-        .into_iter()
-        .map(|(name, artist)| json!({ "name": name, "artist": artist }))
-        .collect();
+    let index = grouped_artists(&artists, base_url, &state.image_secret);
     Ok(json!({
         "artists": {
-            "ignoredArticles": IGNORED_ARTICLES,
+            "ignoredArticles": media::SORT_ARTICLES.join(" "),
             "index": index,
         }
     }))
+}
+
+fn grouped_artists(artists: &[ArtistRow], base_url: &str, secret: &[u8]) -> Vec<Value> {
+    let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for artist in artists {
+        groups
+            .entry(index_letter(&artist.sort_name))
+            .or_default()
+            .push(artist_json(artist, base_url, secret));
+    }
+    groups
+        .into_iter()
+        .map(|(name, artist)| json!({ "name": name, "artist": artist }))
+        .collect()
 }
 
 async fn get_artist(state: &AppState, params: &Params, base_url: &str) -> Result<Value, ApiError> {
@@ -199,15 +191,7 @@ async fn get_music_directory(
         let artists = db::list_artists(&state.db).await?;
         let children: Vec<Value> = artists
             .iter()
-            .map(|artist| {
-                let mut child = artist_json(artist, base_url, &state.image_secret);
-                child["parent"] = json!("1");
-                child["isDir"] = json!(true);
-                child["title"] = json!(artist.name);
-                child["name"] = json!(artist.name);
-                child["album"] = json!(artist.name);
-                child
-            })
+            .map(|artist| artist_dir_json(artist, base_url, &state.image_secret))
             .collect();
         return Ok(json!({
             "directory": {
@@ -226,26 +210,7 @@ async fn get_music_directory(
                 .await?
                 .ok_or_else(|| ApiError::not_found("Artist not found"))?;
             let albums = db::albums_by_artist(&state.db, id).await?;
-            let children: Vec<Value> = albums
-                .iter()
-                .map(|album| {
-                    json!({
-                        "id": album.id,
-                        "parent": album.artist_id,
-                        "isDir": true,
-                        "title": album.name,
-                        "album": album.name,
-                        "artist": album.artist_name,
-                        "artistId": album.artist_id,
-                        "year": album.year,
-                        "genre": album.genre,
-                        "coverArt": album.id,
-                        "songCount": album.song_count,
-                        "duration": album.duration_ms / 1000,
-                        "created": iso(album.added_at),
-                    })
-                })
-                .collect();
+            let children: Vec<Value> = albums.iter().map(|album| album_json(album, None)).collect();
             Ok(json!({
                 "directory": {
                     "id": artist.id,
@@ -329,16 +294,10 @@ async fn scan_status(state: &AppState) -> Result<Value, ApiError> {
     let status = state.scanner.status();
     let last_scan = db::get_last_scan(&state.db).await?;
     let folder_count = db::album_count(&state.db).await.unwrap_or(0);
-    let mut value = json!({
-        "scanning": status.scanning,
-        "count": status.count,
-        "folderCount": folder_count,
-    });
+    let mut value = super::scan_status_fields(&status);
+    value.insert("folderCount".to_string(), json!(folder_count));
     if let Some(timestamp) = last_scan {
-        value["lastScan"] = json!(iso(timestamp));
-    }
-    if let Some(error) = status.error {
-        value["error"] = json!(error);
+        value.insert("lastScan".to_string(), json!(iso(timestamp)));
     }
     Ok(json!({ "scanStatus": value }))
 }
@@ -392,11 +351,18 @@ fn artist_json(artist: &ArtistRow, base_url: &str, secret: &[u8]) -> Value {
     value
 }
 
+fn artist_dir_json(artist: &ArtistRow, base_url: &str, secret: &[u8]) -> Value {
+    let mut child = artist_json(artist, base_url, secret);
+    child["parent"] = json!("1");
+    child["isDir"] = json!(true);
+    child["title"] = json!(artist.name);
+    child["name"] = json!(artist.name);
+    child["album"] = json!(artist.name);
+    child
+}
+
 fn has_artist_art(artist: &ArtistRow) -> bool {
-    artist
-        .art_path
-        .as_deref()
-        .is_some_and(|path| !path.is_empty())
+    artist.art_path.is_some()
 }
 
 fn album_json(album: &AlbumRow, songs: Option<Vec<Value>>) -> Value {
@@ -503,9 +469,8 @@ fn wrapped_list3(key: &str, a: &str, b: &str, c: &str) -> Value {
     Value::Object(root)
 }
 
-fn index_letter(name: &str) -> String {
-    let sorted = media::sort_name(name);
-    match sorted.chars().next() {
+fn index_letter(sort_name: &str) -> String {
+    match sort_name.chars().next() {
         Some(ch) if ch.is_ascii_alphabetic() => ch.to_ascii_uppercase().to_string(),
         _ => "#".to_string(),
     }
@@ -630,9 +595,6 @@ pub async fn serve_art(state: &AppState, id: &str, headers: &HeaderMap) -> Respo
     let Some(path) = cover.cover_path.clone() else {
         return super::response::plain(StatusCode::NOT_FOUND, "cover not found");
     };
-    if path.is_empty() {
-        return super::response::plain(StatusCode::NOT_FOUND, "cover not found");
-    }
 
     let size = cover.cover_size.unwrap_or(0);
     let mtime = cover.cover_mtime.unwrap_or(0);
@@ -655,15 +617,11 @@ pub async fn serve_art(state: &AppState, id: &str, headers: &HeaderMap) -> Respo
             .await
         {
             Ok(bytes) => {
-                if let Err(error) = tokio::fs::create_dir_all(&cache_dir).await {
-                    tracing::warn!("创建封面缓存目录失败: {error}");
-                } else {
-                    let temp = cache_path.with_extension("tmp");
-                    if let Err(error) = tokio::fs::write(&temp, &bytes).await {
-                        tracing::warn!("写入封面缓存失败: {error}");
-                    } else if let Err(error) = tokio::fs::rename(&temp, &cache_path).await {
-                        tracing::warn!("重命名封面缓存失败: {error}");
-                    }
+                let temp = cache_path.with_extension("tmp");
+                if let Err(error) = tokio::fs::write(&temp, &bytes).await {
+                    tracing::warn!("写入封面缓存失败: {error}");
+                } else if let Err(error) = tokio::fs::rename(&temp, &cache_path).await {
+                    tracing::warn!("重命名封面缓存失败: {error}");
                 }
             }
             Err(error) => {

@@ -75,8 +75,7 @@ impl Scanner {
         self.begin_state();
         let this = self.clone();
         tokio::spawn(async move {
-            let result = this.scan_inner().await;
-            if let Err(error) = this.finalize(result).await {
+            if let Err(error) = this.finish_scan().await {
                 tracing::error!("扫描失败: {error:#}");
             }
         });
@@ -88,8 +87,7 @@ impl Scanner {
             bail!("扫描已在进行中");
         }
         self.begin_state();
-        let result = self.scan_inner().await;
-        self.finalize(result).await
+        self.finish_scan().await
     }
 
     fn begin_state(&self) {
@@ -97,10 +95,17 @@ impl Scanner {
         *self.error.lock().unwrap() = None;
     }
 
+    async fn finish_scan(self: &Arc<Self>) -> Result<ScanSummary> {
+        let result = self.scan_inner().await;
+        self.finalize(result).await
+    }
+
     async fn finalize(&self, result: Result<ScanSummary>) -> Result<ScanSummary> {
         let now = now_ms();
-        let total = db::track_count(&self.db).await.unwrap_or(0).max(0) as u64;
-        self.count.store(total, Ordering::SeqCst);
+        if result.is_err() {
+            let total = db::track_count(&self.db).await.unwrap_or(0).max(0) as u64;
+            self.count.store(total, Ordering::SeqCst);
+        }
         match &result {
             Ok(_) => {
                 if let Err(error) = db::set_last_scan(&self.db, Some(now), None).await {
@@ -117,6 +122,35 @@ impl Scanner {
         result
     }
 
+    pub async fn list_root_dirs(&self) -> Result<Vec<RemoteItem>> {
+        let root = self
+            .rclone
+            .list(&self.remote, "", json!({ "dirsOnly": true }))
+            .await
+            .context("列取存储根目录失败")?;
+        Ok(root
+            .into_iter()
+            .filter(|item| item.is_dir && !item.name.starts_with('.'))
+            .collect())
+    }
+
+    pub async fn sample_audio(&self, dirs: &[RemoteItem]) -> Result<Option<RemoteItem>> {
+        for dir in dirs.iter().take(20) {
+            let items = self
+                .rclone
+                .list(
+                    &self.remote,
+                    &dir.path,
+                    json!({ "recurse": true, "filesOnly": true }),
+                )
+                .await?;
+            if let Some(item) = items.into_iter().find(|item| media::is_audio(&item.name)) {
+                return Ok(Some(item));
+            }
+        }
+        Ok(None)
+    }
+
     async fn scan_inner(self: &Arc<Self>) -> Result<ScanSummary> {
         let generation: i64 =
             sqlx::query_scalar("SELECT COALESCE(MAX(generation), 0) + 1 FROM albums")
@@ -124,16 +158,8 @@ impl Scanner {
                 .await
                 .context("读取扫描代际失败")?;
 
-        let root = self
-            .rclone
-            .list(&self.remote, "", json!({ "dirsOnly": true }))
-            .await
-            .context("列取存储根目录失败")?;
-        let mut artist_dirs: Vec<String> = root
-            .into_iter()
-            .filter(|item| item.is_dir && !item.name.starts_with('.'))
-            .map(|item| item.path)
-            .collect();
+        let root = self.list_root_dirs().await?;
+        let mut artist_dirs: Vec<String> = root.into_iter().map(|item| item.path).collect();
         artist_dirs.sort();
 
         if artist_dirs.is_empty() {
@@ -204,6 +230,7 @@ impl Scanner {
 
             let mut album_dirs: Vec<String> = groups.keys().cloned().collect();
             album_dirs.sort();
+            let mut artist_written = false;
             for album_dir in album_dirs {
                 let Some(files) = groups.remove(&album_dir) else {
                     continue;
@@ -212,10 +239,17 @@ impl Scanner {
                     continue;
                 }
                 let tracks = self
-                    .process_album(&album_dir, files, generation, artist_art.as_ref())
+                    .process_album(
+                        &album_dir,
+                        files,
+                        generation,
+                        artist_art.as_ref(),
+                        &mut artist_written,
+                    )
                     .await?;
                 summary.albums += 1;
                 summary.tracks += tracks;
+                self.count.store(summary.tracks as u64, Ordering::SeqCst);
             }
         }
 
@@ -232,6 +266,7 @@ impl Scanner {
         mut files: AlbumFiles,
         generation: i64,
         artist_art: Option<&ArtistArt>,
+        artist_written: &mut bool,
     ) -> Result<usize> {
         files.audio.sort_by_key(natural_key);
 
@@ -320,14 +355,17 @@ impl Scanner {
         };
 
         let mut tx = self.db.begin().await.context("开始专辑事务失败")?;
-        db::upsert_artist(
-            &mut tx,
-            &artist_id,
-            &folder_artist,
-            &media::sort_name(&folder_artist),
-            artist_art.map(|art| (art.path.as_str(), art.size, art.mtime)),
-        )
-        .await?;
+        if !*artist_written {
+            db::upsert_artist(
+                &mut tx,
+                &artist_id,
+                &folder_artist,
+                &media::sort_name(&folder_artist),
+                artist_art.map(|art| (art.path.as_str(), art.size, art.mtime)),
+            )
+            .await?;
+            *artist_written = true;
+        }
         db::upsert_album(
             &mut tx,
             AlbumUpsert {
@@ -375,7 +413,6 @@ impl Scanner {
         tx.commit().await?;
 
         let count = built.len();
-        self.count.fetch_add(count as u64, Ordering::SeqCst);
         tracing::debug!(
             album = %album_title,
             artist = %folder_artist,
@@ -393,7 +430,7 @@ impl Scanner {
         let cue_item = cues.first()?;
         match self
             .rclone
-            .get_bytes_limited(&cue_item.path, 1024 * 1024)
+            .get_bytes_limited(&cue_item.path, cue::MAX_BYTES)
             .await
         {
             Ok(bytes) => match cue::parse(&bytes) {
@@ -464,6 +501,12 @@ fn match_tracks(sheet: &CueSheet, audio: &[RemoteItem]) -> Vec<MatchedTrack> {
         });
     }
 
+    push_unmatched(audio, &used, &mut out);
+    out.sort_by_key(|track| (track.number, track.audio_idx));
+    out
+}
+
+fn push_unmatched(audio: &[RemoteItem], used: &[bool], out: &mut Vec<MatchedTrack>) {
     for (index, item) in audio.iter().enumerate() {
         if used[index] {
             continue;
@@ -475,24 +518,12 @@ fn match_tracks(sheet: &CueSheet, audio: &[RemoteItem]) -> Vec<MatchedTrack> {
             title,
         });
     }
-
-    out.sort_by_key(|track| (track.number, track.audio_idx));
-    out
 }
 
 fn fallback_tracks(audio: &[RemoteItem]) -> Vec<MatchedTrack> {
-    audio
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let (number, title) = media::parse_filename(&item.name);
-            MatchedTrack {
-                audio_idx: index,
-                number: number.unwrap_or(index as u32 + 1),
-                title,
-            }
-        })
-        .collect()
+    let mut out = Vec::with_capacity(audio.len());
+    push_unmatched(audio, &vec![false; audio.len()], &mut out);
+    out
 }
 
 fn find_audio(track: &CueTrack, audio: &[RemoteItem], candidates: &[usize]) -> Option<usize> {
@@ -524,6 +555,7 @@ fn find_audio(track: &CueTrack, audio: &[RemoteItem], candidates: &[usize]) -> O
     candidates.first().copied()
 }
 
+/// 专辑封面只按配置的名字匹配；不兜底任意图片（例如 back.jpg）。
 fn choose_cover<'a>(images: &'a [RemoteItem], names: &[String]) -> Option<&'a RemoteItem> {
     for wanted in names {
         let wanted = wanted.to_lowercase();
@@ -534,7 +566,7 @@ fn choose_cover<'a>(images: &'a [RemoteItem], names: &[String]) -> Option<&'a Re
             return Some(item);
         }
     }
-    images.iter().find(|item| media::is_image(&item.name))
+    None
 }
 
 struct ArtistArt {
@@ -606,6 +638,10 @@ mod tests {
         vec!["artist.jpg".to_string(), "artist.png".to_string()]
     }
 
+    fn cover_names() -> Vec<String> {
+        vec!["cover.jpg".to_string(), "front.jpg".to_string()]
+    }
+
     #[test]
     fn artist_art_is_strict() {
         let items = vec![item("A/Album/artist.jpg"), item("A/cover.jpg")];
@@ -628,5 +664,18 @@ mod tests {
         let items = vec![item("A/Artist.JPG")];
         let chosen = choose_artist_art(&items, "A", &names()).expect("artist art");
         assert_eq!(chosen.path, "A/Artist.JPG");
+    }
+
+    #[test]
+    fn cover_is_strict() {
+        let images = vec![item("A/Album/back.jpg")];
+        assert!(choose_cover(&images, &cover_names()).is_none());
+    }
+
+    #[test]
+    fn cover_prefers_configured_name() {
+        let images = vec![item("A/Album/front.jpg"), item("A/Album/cover.jpg")];
+        let chosen = choose_cover(&images, &cover_names()).expect("cover");
+        assert_eq!(chosen.path, "A/Album/cover.jpg");
     }
 }

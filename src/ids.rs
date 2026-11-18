@@ -1,23 +1,19 @@
-use md5::{Digest, Md5};
+use crate::util::md5_hex;
 
 pub const ARTIST_PREFIX: &str = "ar-";
 pub const ALBUM_PREFIX: &str = "al-";
 pub const TRACK_PREFIX: &str = "tr-";
 
-pub fn digest(input: &str) -> String {
-    hex::encode(Md5::digest(input.as_bytes()))
-}
-
 pub fn artist_id(name: &str) -> String {
-    format!("{ARTIST_PREFIX}{}", digest(name))
+    format!("{ARTIST_PREFIX}{}", md5_hex(name))
 }
 
 pub fn album_id(dir_path: &str) -> String {
-    format!("{ALBUM_PREFIX}{}", digest(dir_path))
+    format!("{ALBUM_PREFIX}{}", md5_hex(dir_path))
 }
 
 pub fn track_id(file_path: &str) -> String {
-    format!("{TRACK_PREFIX}{}", digest(file_path))
+    format!("{TRACK_PREFIX}{}", md5_hex(file_path))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

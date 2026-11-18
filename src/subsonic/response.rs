@@ -54,9 +54,10 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-pub fn ok(format: Format, value: Value) -> Response {
+pub fn ok(format: Format, mut value: Value) -> Response {
+    strip_nulls(&mut value);
     match format {
-        Format::Json => json_response(&value, false, None),
+        Format::Json => json_response(&value, None),
         Format::Xml => match xml_body(&value, false, None) {
             Ok(bytes) => response_with(header_value("text/xml; charset=utf-8"), bytes),
             Err(error) => {
@@ -69,25 +70,7 @@ pub fn ok(format: Format, value: Value) -> Response {
 
 pub fn fail(format: Format, error: ApiError) -> Response {
     match format {
-        Format::Json => {
-            let mut root = Map::new();
-            root.insert("status".to_string(), json!("failed"));
-            root.insert("version".to_string(), json!(VERSION));
-            root.insert("type".to_string(), json!("rclone-subsonic"));
-            root.insert(
-                "serverVersion".to_string(),
-                json!(env!("CARGO_PKG_VERSION")),
-            );
-            root.insert("openSubsonic".to_string(), json!(true));
-            root.insert(
-                "error".to_string(),
-                json!({ "code": error.code, "message": error.message }),
-            );
-            let mut body = json!({ "subsonic-response": Value::Object(root) });
-            strip_nulls(&mut body);
-            let bytes = serde_json::to_vec(&body).unwrap_or_default();
-            response_with(header_value("application/json"), bytes)
-        }
+        Format::Json => json_response(&Value::Object(Map::new()), Some(&error)),
         Format::Xml => match xml_body(&Value::Object(Map::new()), true, Some(&error)) {
             Ok(bytes) => response_with(header_value("text/xml; charset=utf-8"), bytes),
             Err(write_error) => {
@@ -98,7 +81,22 @@ pub fn fail(format: Format, error: ApiError) -> Response {
     }
 }
 
-fn json_response(value: &Value, failed: bool, error: Option<&ApiError>) -> Response {
+fn json_response(value: &Value, error: Option<&ApiError>) -> Response {
+    let mut root = json_envelope(error.is_some());
+    if let Some(error) = error {
+        root.insert(
+            "error".to_string(),
+            json!({ "code": error.code, "message": error.message }),
+        );
+    } else if let Value::Object(map) = value {
+        root.extend(map.clone());
+    }
+    let body = json!({ "subsonic-response": Value::Object(root) });
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    response_with(header_value("application/json"), bytes)
+}
+
+fn json_envelope(failed: bool) -> Map<String, Value> {
     let mut root = Map::new();
     root.insert(
         "status".to_string(),
@@ -111,18 +109,7 @@ fn json_response(value: &Value, failed: bool, error: Option<&ApiError>) -> Respo
         json!(env!("CARGO_PKG_VERSION")),
     );
     root.insert("openSubsonic".to_string(), json!(true));
-    if let Some(error) = error {
-        root.insert(
-            "error".to_string(),
-            json!({ "code": error.code, "message": error.message }),
-        );
-    } else if let Value::Object(map) = value {
-        root.extend(map.clone());
-    }
-    let mut body = json!({ "subsonic-response": Value::Object(root) });
-    strip_nulls(&mut body);
-    let bytes = serde_json::to_vec(&body).unwrap_or_default();
-    response_with(header_value("application/json"), bytes)
+    root
 }
 
 fn strip_nulls(value: &mut Value) {
@@ -241,4 +228,16 @@ pub fn plain(status: StatusCode, message: &str) -> Response {
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Body::from(message.to_string()))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removes_null_object_fields() {
+        let mut value = json!({ "a": null, "b": { "c": null, "d": 1 } });
+        strip_nulls(&mut value);
+        assert_eq!(value, json!({ "b": { "d": 1 } }));
+    }
 }

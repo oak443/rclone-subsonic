@@ -17,10 +17,10 @@ pub struct Config {
     pub artist_art: ArtistArtConfig,
     #[serde(default)]
     pub paths: PathsConfig,
-    #[serde(default)]
-    pub db_path: Option<PathBuf>,
-    #[serde(default)]
-    pub cover_cache_dir: Option<PathBuf>,
+    #[serde(skip)]
+    db_path: PathBuf,
+    #[serde(skip)]
+    cover_cache_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -202,31 +202,22 @@ impl Config {
             cfg.server.public_url = (!trimmed.is_empty()).then_some(trimmed);
         }
 
-        cfg.db_path = Some(expand_path(
-            cfg.paths
-                .db
-                .clone()
-                .or(cfg.db_path.clone())
-                .unwrap_or_else(default_db_path),
-        ));
-        cfg.cover_cache_dir = Some(expand_path(
+        cfg.db_path = expand_path(cfg.paths.db.clone().unwrap_or_else(default_db_path));
+        cfg.cover_cache_dir = expand_path(
             cfg.paths
                 .cover_cache
                 .clone()
-                .or(cfg.cover_cache_dir.clone())
                 .unwrap_or_else(default_cache_dir),
-        ));
+        );
         Ok(cfg)
     }
 
     pub fn db_path(&self) -> &Path {
-        self.db_path.as_deref().expect("db_path resolved in load")
+        &self.db_path
     }
 
     pub fn cover_cache_dir(&self) -> &Path {
-        self.cover_cache_dir
-            .as_deref()
-            .expect("cover_cache_dir resolved in load")
+        &self.cover_cache_dir
     }
 }
 

@@ -12,6 +12,7 @@ use crate::ids::{self, EntityKind};
 pub struct ArtistRow {
     pub id: String,
     pub name: String,
+    pub sort_name: String,
     pub album_count: i64,
     pub art_path: Option<String>,
 }
@@ -300,28 +301,26 @@ const ALBUM_SELECT: &str = "SELECT al.id, al.artist_id, al.name, al.year, al.gen
         al.duration_ms, al.song_count, al.added_at, ar.name AS artist_name
      FROM albums al JOIN artists ar ON ar.id = al.artist_id";
 
+const ARTIST_SELECT: &str =
+    "SELECT ar.id, ar.name, ar.sort_name, ar.art_path, COUNT(al.id) AS album_count
+     FROM artists ar LEFT JOIN albums al ON al.artist_id = ar.id";
+
 pub async fn list_artists(pool: &SqlitePool) -> Result<Vec<ArtistRow>> {
-    let rows = sqlx::query_as::<_, ArtistRow>(
-        "SELECT ar.id, ar.name, ar.art_path, COUNT(al.id) AS album_count
-         FROM artists ar LEFT JOIN albums al ON al.artist_id = ar.id
-         GROUP BY ar.id, ar.name, ar.art_path
-         ORDER BY ar.sort_name",
-    )
-    .fetch_all(pool)
-    .await?;
+    let sql = format!(
+        "{ARTIST_SELECT} GROUP BY ar.id, ar.name, ar.sort_name, ar.art_path ORDER BY ar.sort_name"
+    );
+    let rows = sqlx::query_as::<_, ArtistRow>(&sql).fetch_all(pool).await?;
     Ok(rows)
 }
 
 pub async fn artist_by_id(pool: &SqlitePool, id: &str) -> Result<Option<ArtistRow>> {
-    let row = sqlx::query_as::<_, ArtistRow>(
-        "SELECT ar.id, ar.name, ar.art_path, COUNT(al.id) AS album_count
-         FROM artists ar LEFT JOIN albums al ON al.artist_id = ar.id
-         WHERE ar.id = ?
-         GROUP BY ar.id, ar.name, ar.art_path",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let sql = format!(
+        "{ARTIST_SELECT} WHERE ar.id = ? GROUP BY ar.id, ar.name, ar.sort_name, ar.art_path"
+    );
+    let row = sqlx::query_as::<_, ArtistRow>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 

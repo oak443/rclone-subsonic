@@ -7,6 +7,7 @@ mod media;
 mod rclone;
 mod scanner;
 mod subsonic;
+mod util;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,7 +61,7 @@ async fn main() -> Result<()> {
     );
 
     let (rclone, _managed) = connect_rclone(&cfg).await?;
-    tokio::fs::create_dir_all(cfg.cover_cache_dir())
+    tokio::fs::create_dir_all(cfg.cover_cache_dir().join("covers"))
         .await
         .context("创建封面缓存目录失败")?;
     let db = db::connect(cfg.db_path()).await?;
@@ -76,7 +77,7 @@ async fn main() -> Result<()> {
             );
         }
         Command::Check => {
-            check(&rclone, &cfg).await?;
+            check(&rclone, &scanner).await?;
         }
         Command::Serve => {
             serve(cfg, db, scanner, rclone, image_secret).await?;
@@ -161,7 +162,7 @@ async fn serve(
     Ok(())
 }
 
-async fn check(rclone: &RcloneClient, cfg: &Config) -> Result<()> {
+async fn check(rclone: &RcloneClient, scanner: &Scanner) -> Result<()> {
     let version = rclone.rc_version().await?;
     println!(
         "rclone: {}",
@@ -171,13 +172,7 @@ async fn check(rclone: &RcloneClient, cfg: &Config) -> Result<()> {
             .unwrap_or("unknown")
     );
 
-    let root = rclone
-        .list(
-            &cfg.storage.remote,
-            "",
-            serde_json::json!({ "dirsOnly": true }),
-        )
-        .await?;
+    let root = scanner.list_root_dirs().await?;
     println!("根目录子目录: {} 个", root.len());
     for item in root.iter().take(5) {
         println!("  - {}", item.name);
@@ -186,21 +181,10 @@ async fn check(rclone: &RcloneClient, cfg: &Config) -> Result<()> {
         println!("  ...");
     }
 
-    let mut sample = None;
-    for dir in root.iter().filter(|item| item.is_dir).take(20) {
-        let items = rclone
-            .list(
-                &cfg.storage.remote,
-                &dir.path,
-                serde_json::json!({ "recurse": true, "filesOnly": true }),
-            )
-            .await?;
-        if let Some(item) = items.iter().find(|item| media::is_audio(&item.name)) {
-            sample = Some(item.clone());
-            break;
-        }
-    }
-    let audio = sample.context("前 20 个子目录中没有音频文件")?;
+    let audio = scanner
+        .sample_audio(&root)
+        .await?
+        .context("前 20 个子目录中没有音频文件")?;
     let head = rclone.fetch_head(&audio.path, 64).await?;
     println!(
         "抽样读取: {} ({} bytes, head {} bytes, magic {:?})",

@@ -55,12 +55,8 @@ impl RcloneClient {
         rc_user: impl Into<String>,
         rc_pass: impl Into<String>,
     ) -> Result<Self> {
-        let mut base_http =
+        let base_http =
             Url::parse(http_url).with_context(|| format!("无效的 storage.http_url: {http_url}"))?;
-        if base_http.path() != "/" {
-            let path = base_http.path().trim_end_matches('/').to_string();
-            base_http.set_path(&path);
-        }
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(8)
@@ -140,18 +136,23 @@ impl RcloneClient {
         Ok(parsed.list)
     }
 
+    fn request(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder> {
+        let url = self.url_for(path)?;
+        let mut request = self.http.request(method, url);
+        if !self.http_user.is_empty() {
+            request = request.basic_auth(&self.http_user, Some(&self.http_pass));
+        }
+        Ok(request)
+    }
+
     async fn file_request(
         &self,
         method: Method,
         path: &str,
         headers: &HeaderMap,
     ) -> Result<Response> {
-        let url = self.url_for(path)?;
-        let mut request = self.http.request(method, url).headers(headers.clone());
-        if !self.http_user.is_empty() {
-            request = request.basic_auth(&self.http_user, Some(&self.http_pass));
-        }
-        request
+        self.request(method, path)?
+            .headers(headers.clone())
             .send()
             .await
             .with_context(|| format!("请求 rclone 文件失败: {path}"))
@@ -172,11 +173,8 @@ impl RcloneClient {
 
     pub async fn fetch_head(&self, path: &str, bytes: usize) -> Result<Bytes> {
         let bytes = bytes.max(1);
-        let mut request = self.http.get(self.url_for(path)?);
-        if !self.http_user.is_empty() {
-            request = request.basic_auth(&self.http_user, Some(&self.http_pass));
-        }
-        let response = request
+        let response = self
+            .request(Method::GET, path)?
             .header(RANGE, format!("bytes=0-{}", bytes - 1))
             .send()
             .await
@@ -192,11 +190,8 @@ impl RcloneClient {
     }
 
     pub async fn get_bytes_limited(&self, path: &str, max: usize) -> Result<Bytes> {
-        let mut request = self.http.get(self.url_for(path)?);
-        if !self.http_user.is_empty() {
-            request = request.basic_auth(&self.http_user, Some(&self.http_pass));
-        }
-        let response = request
+        let response = self
+            .request(Method::GET, path)?
             .send()
             .await
             .with_context(|| format!("下载文件失败: {path}"))?;

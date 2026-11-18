@@ -1,9 +1,12 @@
 use encoding_rs::Encoding;
 
+use crate::media::extract_year;
+
+pub const MAX_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Default)]
 pub struct CueSheet {
     pub title: Option<String>,
-    pub performer: Option<String>,
     pub genre: Option<String>,
     pub year: Option<i64>,
     pub disc: u32,
@@ -16,16 +19,15 @@ pub struct CueTrack {
     pub file: Option<String>,
     pub number: u32,
     pub title: Option<String>,
-    pub performer: Option<String>,
-    /// INDEX 01 相对 FILE 的毫秒偏移
-    pub index01_ms: Option<u64>,
+    /// 是否出现 INDEX 01；用于识别把 INDEX 01 放在 FILE 之后的 CUE
+    pub has_index01: bool,
 }
 
 pub fn parse(bytes: &[u8]) -> Result<CueSheet, String> {
     if bytes.is_empty() {
         return Err("CUE 文件为空".to_string());
     }
-    if bytes.len() > 4 * 1024 * 1024 {
+    if bytes.len() > MAX_BYTES {
         return Err("CUE 文件过大".to_string());
     }
     let text = decode(bytes);
@@ -88,7 +90,7 @@ fn parse_text(text: &str) -> Result<CueSheet, String> {
                 }
                 if let Some(track) = current_track.as_mut() {
                     // 少数 CUE（如 cyanrip 产物）把 INDEX 01 放在 FILE 之后
-                    if track.index01_ms.is_none() {
+                    if !track.has_index01 {
                         track.file = Some(name.clone());
                     }
                 }
@@ -107,8 +109,7 @@ fn parse_text(text: &str) -> Result<CueSheet, String> {
                     file: current_file.clone(),
                     number,
                     title: None,
-                    performer: None,
-                    index01_ms: None,
+                    has_index01: false,
                 });
             }
             "TITLE" => {
@@ -119,22 +120,12 @@ fn parse_text(text: &str) -> Result<CueSheet, String> {
                     sheet.title = val;
                 }
             }
-            "PERFORMER" => {
-                let val = nonempty(value(rest));
-                if let Some(track) = current_track.as_mut() {
-                    track.performer = val;
-                } else {
-                    sheet.performer = val;
-                }
-            }
             "INDEX" => {
-                let mut it = rest.split_whitespace();
-                let index = it.next().unwrap_or("");
-                let time = it.next().unwrap_or("");
+                let index = rest.split_whitespace().next().unwrap_or("");
                 if index.trim_start_matches('0') == "1"
                     && let Some(track) = current_track.as_mut()
                 {
-                    track.index01_ms = parse_time_ms(time);
+                    track.has_index01 = true;
                     if track.file.is_none() {
                         track.file = current_file.clone();
                     }
@@ -170,36 +161,6 @@ fn nonempty(value: String) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
-fn extract_year(input: &str) -> Option<i64> {
-    let chars: Vec<char> = input.chars().collect();
-    for window in chars.windows(4) {
-        if !window.iter().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let text: String = window.iter().collect();
-        if let Ok(year) = text.parse::<i64>()
-            && (1900..=2100).contains(&year)
-        {
-            return Some(year);
-        }
-    }
-    None
-}
-
-fn parse_time_ms(input: &str) -> Option<u64> {
-    let parts: Vec<&str> = input.trim().split(':').collect();
-    let (minutes, seconds, frames) = match parts.as_slice() {
-        [m, s] => (m.parse::<u64>().ok()?, s.parse::<u64>().ok()?, 0),
-        [m, s, f] => (
-            m.parse::<u64>().ok()?,
-            s.parse::<u64>().ok()?,
-            f.parse::<u64>().ok()?,
-        ),
-        _ => return None,
-    };
-    Some((minutes * 60 + seconds) * 1000 + frames * 1000 / 75)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,11 +191,11 @@ TRACK 03 AUDIO
         let sheet = parse(SAMPLE.as_bytes()).unwrap();
         assert_eq!(sheet.year, Some(2008));
         assert_eq!(sheet.genre.as_deref(), Some("J-Pop"));
-        assert_eq!(sheet.performer.as_deref(), Some("ランカ・リー＝中島愛"));
         assert_eq!(sheet.title.as_deref(), Some("星間飛行"));
         assert_eq!(sheet.tracks.len(), 3);
         assert_eq!(sheet.tracks[0].number, 1);
         assert_eq!(sheet.tracks[0].title.as_deref(), Some("星間飛行"));
+        assert!(sheet.tracks.iter().all(|track| track.has_index01));
         assert_eq!(sheet.tracks[1].file.as_deref(), Some("2 - ねこ日記.flac"));
         assert_eq!(sheet.tracks[2].number, 3);
     }
@@ -249,12 +210,5 @@ TRACK 03 AUDIO
         with_bom.extend_from_slice(b"TITLE \"BOM\"\nTRACK 01 AUDIO\n");
         let sheet = parse(&with_bom).unwrap();
         assert_eq!(sheet.title.as_deref(), Some("BOM"));
-    }
-
-    #[test]
-    fn parses_time() {
-        assert_eq!(parse_time_ms("03:51:22"), Some(231_293));
-        assert_eq!(parse_time_ms("00:00:00"), Some(0));
-        assert_eq!(parse_time_ms("bad"), None);
     }
 }

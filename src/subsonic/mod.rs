@@ -11,7 +11,7 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sha2::Sha256;
 use sqlx::SqlitePool;
 use tower_http::cors::CorsLayer;
@@ -19,7 +19,8 @@ use tower_http::cors::CorsLayer;
 use crate::config::Config;
 use crate::ids;
 use crate::rclone::RcloneClient;
-use crate::scanner::Scanner;
+use crate::scanner::{ScanStatusView, Scanner};
+use crate::util::constant_eq;
 use response::Format;
 
 pub struct AppState {
@@ -64,14 +65,21 @@ async fn index() -> &'static str {
     "rclone-subsonic\n"
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     let status = state.scanner.status();
-    Json(json!({
-        "status": "ok",
-        "scanning": status.scanning,
-        "count": status.count,
-        "error": status.error,
-    }))
+    let mut fields = scan_status_fields(&status);
+    fields.insert("status".to_string(), json!("ok"));
+    Json(Value::Object(fields))
+}
+
+pub(crate) fn scan_status_fields(status: &ScanStatusView) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("scanning".to_string(), json!(status.scanning));
+    fields.insert("count".to_string(), json!(status.count));
+    if let Some(error) = &status.error {
+        fields.insert("error".to_string(), json!(error));
+    }
+    fields
 }
 
 async fn dispatch(
@@ -145,14 +153,8 @@ async fn public_image(
 
 /// 对外访问根地址：优先 config.server.public_url，其次按请求的 Host 推导。
 fn public_base_url(state: &AppState, headers: &HeaderMap) -> String {
-    if let Some(url) = state
-        .config
-        .server
-        .public_url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-    {
-        return url.trim_end_matches('/').to_string();
+    if let Some(url) = state.config.server.public_url.as_deref() {
+        return url.to_string();
     }
     let scheme = headers
         .get("x-forwarded-proto")
@@ -194,19 +196,8 @@ fn verify_image_token(secret: &[u8], id: &str, token: &str) -> bool {
     constant_eq(expected.as_bytes(), token.as_bytes())
 }
 
-fn constant_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in left.iter().zip(right) {
-        diff |= a ^ b;
-    }
-    diff == 0
-}
-
 fn request_format(params: &Params) -> Format {
-    match params.get("f").or_else(|| params.get("format")) {
+    match params.get("f") {
         Some("json") => Format::Json,
         _ => Format::Xml,
     }

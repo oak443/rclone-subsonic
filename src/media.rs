@@ -5,6 +5,9 @@ pub const AUDIO_EXTENSIONS: &[&str] = &[
 
 pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
+/// 排序时忽略的英文冠词；`ignoredArticles` 响应字段也由它生成。
+pub const SORT_ARTICLES: &[&str] = &["The", "A", "An"];
+
 pub fn extension(name: &str) -> String {
     name.rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
@@ -40,15 +43,15 @@ pub fn image_content_type(name: &str) -> &'static str {
     match extension(name).as_str() {
         "png" => "image/png",
         "webp" => "image/webp",
-        "gif" => "image/gif",
         _ => "image/jpeg",
     }
 }
 
 pub fn sort_name(name: &str) -> String {
     let lower = name.to_lowercase();
-    for article in ["the ", "a ", "an "] {
-        if let Some(rest) = lower.strip_prefix(article) {
+    for article in SORT_ARTICLES {
+        let prefix = format!("{} ", article.to_ascii_lowercase());
+        if let Some(rest) = lower.strip_prefix(&prefix) {
             let rest = rest.trim_start();
             if !rest.is_empty() {
                 return rest.to_string();
@@ -62,7 +65,7 @@ pub fn sort_name(name: &str) -> String {
 pub fn parse_filename(name: &str) -> (Option<u32>, String) {
     let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
     let stem = stem.trim();
-    let digits_len = stem.chars().take_while(|c| c.is_ascii_digit()).count();
+    let digits_len = leading_digits_len(stem);
     if digits_len == 0 {
         return (None, stem.to_string());
     }
@@ -82,16 +85,16 @@ pub fn parse_filename(name: &str) -> (Option<u32>, String) {
 }
 
 pub fn leading_number(name: &str) -> Option<u32> {
-    let digits: String = name
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse::<u32>().ok()
+    let stem = name.trim_start();
+    let digits_len = leading_digits_len(stem);
+    if digits_len == 0 {
+        return None;
     }
+    stem[..digits_len].parse::<u32>().ok()
+}
+
+fn leading_digits_len(stem: &str) -> usize {
+    stem.chars().take_while(|c| c.is_ascii_digit()).count()
 }
 
 /// 归一化文件名主干：小写、只保留字母数字、去掉数字串前导零。
@@ -157,6 +160,12 @@ mod tests {
     fn normalizes_cue_names() {
         assert_eq!(norm_stem("1 - 星間飛行.flac"), "1星間飛行");
         assert_eq!(norm_stem("01 星間飛行.flac"), "1星間飛行");
+    }
+
+    #[test]
+    fn extracts_leading_number() {
+        assert_eq!(leading_number("01 track.flac"), Some(1));
+        assert_eq!(leading_number("intro.flac"), None);
     }
 
     #[test]
